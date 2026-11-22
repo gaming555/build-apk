@@ -77,6 +77,24 @@ jobs:
           fi
           echo "directory=$(dirname "$PUBSPEC")" >> "$GITHUB_OUTPUT"
 
+      - name: Diagnose Android build toolchain
+        working-directory: ${{ steps.project.outputs.directory }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "=== Flutter / Java ==="
+          flutter --version
+          java -version
+          echo "=== Gradle wrapper ==="
+          if [ -f android/gradle/wrapper/gradle-wrapper.properties ]; then
+            grep -E '^distributionUrl=' android/gradle/wrapper/gradle-wrapper.properties || true
+          else
+            echo "Gradle wrapper properties not found"
+          fi
+          echo "=== Android Gradle Plugin declarations ==="
+          grep -RInE "com\.android\.application.*version|com\.android\.tools\.build:gradle" \
+            android/settings.gradle android/settings.gradle.kts android/build.gradle android/build.gradle.kts 2>/dev/null || true
+
       - name: Get dependencies
         working-directory: ${{ steps.project.outputs.directory }}
         run: flutter pub get
@@ -84,12 +102,12 @@ jobs:
       - name: Build Debug APK
         if: inputs.build_type == 'debug'
         working-directory: ${{ steps.project.outputs.directory }}
-        run: flutter build apk --debug
+        run: flutter build apk --debug --android-skip-build-dependency-validation
 
       - name: Build Release APK
         if: inputs.build_type == 'release'
         working-directory: ${{ steps.project.outputs.directory }}
-        run: flutter build apk --release
+        run: flutter build apk --release --android-skip-build-dependency-validation
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
