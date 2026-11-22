@@ -1,0 +1,100 @@
+name: Flutter APK Build
+run-name: Flutter APK Build - ${{ inputs.release_tag }} - ${{ inputs.request_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_url:
+        description: HTTPS URL of the source ZIP in this repository's release
+        required: true
+        type: string
+      release_tag:
+        description: Temporary source release tag
+        required: true
+        type: string
+      request_id:
+        description: Unique dispatch identifier
+        required: true
+        type: string
+      build_type:
+        description: APK build mode
+        required: true
+        type: choice
+        options:
+          - debug
+          - release
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: flutter-build-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout builder repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Download source ZIP
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_URL: ${{ inputs.source_url }}
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/octet-stream" \
+            "${SOURCE_URL}" -o source.zip
+          test -s source.zip
+          mkdir source
+          unzip -q source.zip -d source
+
+      - name: Locate Flutter project
+        id: project
+        run: |
+          set -euo pipefail
+          PUBSPEC="$(find "$GITHUB_WORKSPACE/source" -name pubspec.yaml -type f -print -quit)"
+          if [ -z "$PUBSPEC" ]; then
+            echo "pubspec.yaml tidak ditemukan. ZIP harus berisi project Flutter." >&2
+            exit 1
+          fi
+          echo "directory=$(dirname "$PUBSPEC")" >> "$GITHUB_OUTPUT"
+
+      - name: Get dependencies
+        working-directory: ${{ steps.project.outputs.directory }}
+        run: flutter pub get
+
+      - name: Build Debug APK
+        if: inputs.build_type == 'debug'
+        working-directory: ${{ steps.project.outputs.directory }}
+        run: flutter build apk --debug
+
+      - name: Build Release APK
+        if: inputs.build_type == 'release'
+        working-directory: ${{ steps.project.outputs.directory }}
+        run: flutter build apk --release
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-build-${{ inputs.build_type }}
+          path: ${{ steps.project.outputs.directory }}/build/app/outputs/flutter-apk/*.apk
+          if-no-files-found: error
+          retention-days: 1
