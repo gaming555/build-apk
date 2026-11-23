@@ -35,7 +35,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - name: Checkout builder repository
         uses: actions/checkout@v4
@@ -46,20 +46,16 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # Pin Flutter so a new stable release cannot silently change the
-      # Android toolchain requirements for uploaded projects.
-      - name: Set up Flutter
+      - name: Set up Flutter (pinned for legacy Android toolchain)
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.47.2'
-          channel: stable
+          flutter-version: '3.41.9'
           cache: true
 
       - name: Download source ZIP
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_URL: ${{ inputs.source_url }}
-        shell: bash
         run: |
           set -euo pipefail
           curl --fail --location --retry 3 \
@@ -72,7 +68,6 @@ jobs:
 
       - name: Locate Flutter project
         id: project
-        shell: bash
         run: |
           set -euo pipefail
           PUBSPEC="$(find "$GITHUB_WORKSPACE/source" -name pubspec.yaml -type f -print -quit)"
@@ -81,33 +76,6 @@ jobs:
             exit 1
           fi
           echo "directory=$(dirname "$PUBSPEC")" >> "$GITHUB_OUTPUT"
-
-      # The previous failure reported Gradle 8.12.0 while the project's
-      # Android Gradle Plugin requires Gradle 9.3.1. Update only the wrapper;
-      # do not blindly replace the app's AGP/Kotlin configuration.
-      - name: Align Gradle Wrapper
-        working-directory: ${{ steps.project.outputs.directory }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          WRAPPER="android/gradle/wrapper/gradle-wrapper.properties"
-          if [ ! -f "$WRAPPER" ]; then
-            echo "File $WRAPPER tidak ditemukan di project Flutter." >&2
-            exit 1
-          fi
-          python3 - "$WRAPPER" <<'PY'
-          from pathlib import Path
-          import re, sys
-          path = Path(sys.argv[1])
-          text = path.read_text(encoding='utf-8')
-          pattern = r'(?m)^distributionUrl=.*gradle-[0-9][A-Za-z0-9.\-]*-(?:all|bin)\.zip\s*$'
-          replacement = 'distributionUrl=https\\://services.gradle.org/distributions/gradle-9.3.1-all.zip'
-          updated, count = re.subn(pattern, replacement, text)
-          if count != 1:
-              raise SystemExit('Tidak bisa memperbarui distributionUrl Gradle Wrapper secara aman; periksa gradle-wrapper.properties.')
-          path.write_text(updated, encoding='utf-8')
-          print('Gradle Wrapper disetel ke 9.3.1')
-          PY
 
       - name: Diagnose Android build toolchain
         working-directory: ${{ steps.project.outputs.directory }}
@@ -118,53 +86,51 @@ jobs:
           flutter --version
           echo '=== Java ==='
           java -version
-          echo '=== Gradle Wrapper ==='
-          grep -E '^distributionUrl=' android/gradle/wrapper/gradle-wrapper.properties
-          echo '=== Android Gradle Plugin declarations ==='
-          grep -RInE 'com\.android\.application.*version|com\.android\.tools\.build:gradle' \
+          echo '=== Gradle wrapper ==='
+          if [ -f android/gradle/wrapper/gradle-wrapper.properties ]; then
+            grep -E '^distributionUrl=' android/gradle/wrapper/gradle-wrapper.properties || true
+          else
+            echo 'Gradle wrapper properties not found'
+          fi
+          echo '=== Android Gradle Plugin / Kotlin declarations ==='
+          grep -RInE 'com\.android\.application.*version|com\.android\.tools\.build:gradle|org\.jetbrains\.kotlin\.android.*version|kotlin_version' \
             android/settings.gradle android/settings.gradle.kts android/build.gradle android/build.gradle.kts 2>/dev/null || true
-          echo '=== Gradle runtime ==='
-          cd android
-          chmod +x gradlew
-          ./gradlew --version
 
       - name: Get dependencies
         working-directory: ${{ steps.project.outputs.directory }}
-        shell: bash
         run: flutter pub get
 
       - name: Build Debug APK
         if: inputs.build_type == 'debug'
-        id: debug_build
         working-directory: ${{ steps.project.outputs.directory }}
         shell: bash
         run: |
           set -o pipefail
-          flutter build apk --debug --verbose 2>&1 | tee "$RUNNER_TEMP/flutter-build.log"
+          flutter build apk --debug --verbose 2>&1 | tee "$GITHUB_WORKSPACE/build-debug.log"
 
       - name: Build Release APK
         if: inputs.build_type == 'release'
-        id: release_build
         working-directory: ${{ steps.project.outputs.directory }}
         shell: bash
         run: |
           set -o pipefail
-          flutter build apk --release --verbose 2>&1 | tee "$RUNNER_TEMP/flutter-build.log"
-
-      - name: Upload build diagnostic log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: flutter-build-diagnostic-${{ inputs.request_id }}
-          path: ${{ runner.temp }}/flutter-build.log
-          if-no-files-found: warn
-          retention-days: 3
+          flutter build apk --release --verbose 2>&1 | tee "$GITHUB_WORKSPACE/build-release.log"
 
       - name: Upload APK artifact
-        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: apk-build-${{ inputs.build_type }}
           path: ${{ steps.project.outputs.directory }}/build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
           retention-days: 1
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flutter-build-diagnostics-${{ inputs.build_type }}
+          path: |
+            ${{ github.workspace }}/build-debug.log
+            ${{ github.workspace }}/build-release.log
+          if-no-files-found: ignore
+          retention-days: 3
